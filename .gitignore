@@ -1,0 +1,77 @@
+# Node.js / Frontend dependencies & build outputs
+node_modules/
+dist/
+build/
+out/
+.next/
+.nuxt/
+.output/
+.svelte-kit/
+.parcel-cache/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Python / Backend virtual environments & caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.ruff_cache/
+
+# Environment variables & secrets (KEEP SECRET!)
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+
+# Database files
+*.sqlite
+*.sqlite3
+*.db
+
+# Operating System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE & Editor configurations
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+
+# Logs and temporary files
+logs/
+*.log
+tmp/
+temp/
