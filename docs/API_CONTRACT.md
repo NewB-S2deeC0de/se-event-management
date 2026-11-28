@@ -41,15 +41,21 @@ không tuyên bố coverage đầy đủ. #1 và #2 cần thống nhất trướ
   Không ép kiểu chuỗi thành number trong JSON; query số phải là số nguyên thập phân.
 - Lỗi: `error.code`, `error.message` là string; `error.details` optional array
   `{field: string, message: string}`. Không lộ SQL, stack, token hoặc PII.
-- 200 read/update/cancel; 201 create/register/upload; 400 validation; 401 token;
+- 200 read/update/cancel hoặc gửi lại đăng ký cùng khóa; 201 create/register/upload; 400 validation; 401 token;
   403 quyền; 404 thiếu resource; 409 conflict; 413 quá lớn; 415 sai media;
   500 unexpected. Không dùng 200 cho lỗi, không dùng 409 khi vào chờ thành công.
   Không có app logout/204 trong phương án này; nếu có 204 tương lai thì không body.
 - GET không side effect. Không có DELETE, promote, force-confirm, set-position
   hay join-waitlist riêng. Không có notification, QR, websocket hoặc check-in API.
-- Tất cả list có thứ tự xác định kèm ID/tie-breaker; response là snapshot nhất quán
-  tại thời điểm đọc, có thể thay đổi ngay sau đó. FE refetch sau mutation và khi
-  quay lại màn hình; cơ chế refresh nền cần nhóm chốt, chưa hứa push tức thì.
+- Tất cả list có thứ tự xác định kèm ID hoặc khóa phụ để phân xử khi trùng thứ tự.
+  Mỗi response phản ánh dữ liệu tại thời điểm đọc.
+- Frontend tải lại dữ liệu liên quan ngay sau khi thao tác thành công và khi người
+  dùng quay lại màn hình. Khi tab đang hiển thị, trang danh sách workshop, chi
+  tiết workshop, Workshop của tôi và danh sách người tham gia của BTC tải lại dữ
+  liệu mỗi 5 giây. Tạm dừng khi tab bị ẩn và tải lại ngay khi tab hiện lại.
+- Mục tiêu nghiệm thu trong điều kiện mạng bình thường là thay đổi từ phiên khác
+  hiển thị trong vòng 10 giây kể từ khi giao dịch commit. Các lần tải lại phải
+  đọc dữ liệu mới từ API.
 
 Ví dụ empty list:
 
@@ -280,10 +286,23 @@ Repeat cancel 200 không side effect (kể cả đã qua start); active đã sta
 Owner Organizer; workshop đã tạo, active chưa bắt đầu. Không query; multipart duy
 nhất field `file`, JPEG/PNG/WebP, tối đa **5 MiB (5,242,880 bytes)** proposed.
 Server kiểm nội dung thực và MIME; không nhận URL/storage path từ client.
-Thành công thay banner_url, updated_at; giữ banner cũ nếu upload/DB update thất bại.
-Không công bố URL mới trước khi cập nhật thành công; storage cụ thể cần nhóm chốt.
-400 thiếu file, 413 `FILE_TOO_LARGE`, 415 `UNSUPPORTED_MEDIA_TYPE`,
-409 `WORKSHOP_CANCELLED`/`WORKSHOP_STARTED`. Multipart minh họa:
+Sau khi xác thực quyền và kiểm tra file, server tải ảnh mới lên storage. Ngay
+trước khi ghi `banner_url`, server lấy cùng khóa workshop dùng cho các thao tác
+sửa và hủy. Dưới khóa, server kiểm tra lại workshop còn active và chưa bắt đầu
+theo mốc thời gian tại §7.
+
+- Nếu hợp lệ, cập nhật `banner_url` và `updated_at`, commit rồi trả `201`. Chỉ trả
+  URL mới sau khi commit thành công.
+- Nếu workshop đã hủy hoặc bắt đầu, trả `409 WORKSHOP_CANCELLED` hoặc
+  `409 WORKSHOP_STARTED`. Giữ nguyên banner hiện tại và dọn ảnh mới chưa được
+  gắn với workshop.
+- Nếu tải ảnh hoặc lưu DB thất bại, giữ nguyên banner hiện tại. Nếu ảnh mới đã
+  tải lên và giao dịch ghi URL đã rollback, dọn ảnh mới. Nếu storage chưa xóa
+  được ngay, ghi nhận để dọn lại.
+
+Storage cụ thể cần nhóm chốt. Trả `400 VALIDATION_ERROR` khi thiếu file,
+`413 FILE_TOO_LARGE` khi vượt giới hạn và `415 UNSUPPORTED_MEDIA_TYPE` khi sai
+định dạng. Multipart minh họa:
 
 ```http
 POST /api/v1/workshops/w1/banner
@@ -311,10 +330,25 @@ student/status/position/timestamp; server quyết định kết quả.
 
 ### POST /workshops/{id}/registrations
 
-Student; gate open và không active registration. Atomic create confirmed nếu còn
-chỗ sau khi phục vụ queue cũ, hoặc waitlisted ở cuối. Cả hai trả **201** Registration.
-409 `ALREADY_REGISTERED`, `WORKSHOP_CANCELLED`, `WORKSHOP_STARTED`,
-`REGISTRATION_DEADLINE_PASSED`, `REGISTRATION_CLOSED`. Hai response có thể:
+Student. Bắt buộc gửi header `Idempotency-Key` là UUID v4. Thiếu header hoặc sai
+định dạng trả `400 VALIDATION_ERROR`. Frontend tạo một khóa cho mỗi lần người
+dùng chủ động đăng ký và dùng lại đúng khóa đó khi gửi lại request vì timeout
+hoặc mất kết nối. Nếu frontend và backend khác origin, cấu hình CORS phải cho
+phép header `Idempotency-Key`.
+
+- Nếu khóa đã được dùng thành công cho cùng sinh viên và workshop, trả `200`
+  với Registration hiện tại của lần đăng ký đó. Nếu sinh viên đã hủy, trả bản ghi
+  `cancelled` với cùng ID và `ticket: null`.
+- Nếu khóa chưa được dùng thành công, áp dụng các kiểm tra tại §8. Khi đủ điều
+  kiện, tạo bản ghi `confirmed` nếu còn chỗ sau khi phục vụ hàng chờ hiện có,
+  hoặc `waitlisted` ở cuối hàng. Cả hai trường hợp trả `201`.
+- Sinh viên chủ động đăng ký lại sau khi hủy thì dùng khóa mới. Nếu đã có đăng ký
+  hoạt động, request dùng khóa mới trả `409 ALREADY_REGISTERED` theo thứ tự tại §8.
+
+Các lỗi nghiệp vụ khác gồm `WORKSHOP_CANCELLED`, `WORKSHOP_STARTED`,
+`REGISTRATION_DEADLINE_PASSED` và `REGISTRATION_CLOSED`, đều trả `409`.
+
+Ví dụ response `201` cho hai trường hợp:
 
 ```json
 {"data":{"id":"r1","workshop_id":"w1","status":"confirmed","registered_at":"2026-12-01T03:00:00Z","confirmed_at":"2026-12-01T03:00:00Z","cancelled_at":null,"cancellation_reason":null,"queue_position":null,"ticket":{"registration_id":"r1"}}}
@@ -389,9 +423,20 @@ Không xuất token, password, dữ liệu waitlisted hoặc thông tin không c
 
 Các quy tắc sau là nghĩa vụ implementation tương lai, chưa được triển khai.
 Mỗi mutation cùng workshop (register, cancel, capacity, manual status, event cancel,
-edit time) phải serialize bằng DB transaction + lock hoặc atomic RPC thích hợp.
+edit time, ghi URL banner) phải serialize bằng DB transaction + lock hoặc atomic
+RPC thích hợp. Việc tải ảnh lên storage diễn ra trước khi lấy khóa để ghi URL.
 Check quyền/lifecycle/gate, deduplicate, allocate, promote, counts và cập nhật trạng
 thái commit/rollback nguyên tử; không read-then-write rời rạc dựa vào counts ở FE.
+
+Sau khi lấy được khóa workshop, server lấy một mốc thời gian hiện tại
+(`decision_at`). Dùng cùng mốc này để kiểm tra hạn đăng ký, giờ bắt đầu và điều
+kiện chuyển người từ hàng chờ lên chính thức trong giao dịch.
+
+Tại `decision_at >= registration_deadline`, đăng ký mới trả
+`409 REGISTRATION_DEADLINE_PASSED` nếu không có lỗi ưu tiên cao hơn theo §8.
+Request đến trước hạn nhưng chỉ lấy được khóa đúng hạn hoặc sau hạn cũng
+áp dụng quy tắc này. Với PostgreSQL, lấy `clock_timestamp()` sau khi có khóa.
+`now()` phản ánh thời điểm bắt đầu giao dịch.
 
 - Invariant: confirmed_count <= capacity; remaining_slots không âm; nhiều nhất
   một active registration mỗi (student, workshop), không đồng thời confirmed và
@@ -409,12 +454,16 @@ thái commit/rollback nguyên tử; không read-then-write rời rạc dựa và
   hoặc now >= start không promote. Full không đóng gate.
 - Cutoff hủy/rút chờ là start_at; event cancellation và edit cũng chỉ trước start.
   Retry student cancel hoặc event cancel đã thành công luôn trả kết quả cũ.
-  Đăng ký retry khi còn active trả 409, không phát sinh queue entry mới; retry sau
-  student cancel được coi là lần đăng ký mới nếu gate vẫn mở. Chưa thêm idempotency key.
+- Khóa `Idempotency-Key` được lưu cùng ID của lần đăng ký trong giao dịch tạo
+  đăng ký thành công. Bảo đảm duy nhất theo bộ
+  `(student_id, workshop_id, idempotency_key)` và giữ khóa cùng lịch sử đăng ký,
+  kể cả sau khi hủy. Hai request đồng thời dùng cùng khóa chỉ tạo một bản ghi.
+  Nếu giao dịch rollback, khóa vẫn có thể dùng lại.
 - Event cancel terminal: hủy mọi active registrations và không chạy promotion;
   roster active rỗng, My Workshops hiển thị cancelled/workshop_cancelled.
-- Counts, danh sách và rank trong từng response phải cùng snapshot. Sau commit FE
-  refetch detail/My Workshops/roster có liên quan; không suy ra kết quả từ count cũ.
+- Số lượng, danh sách và vị trí hàng chờ trong cùng một response phải phản ánh
+  cùng một snapshot. Sau khi giao dịch commit, frontend tải lại dữ liệu theo §2
+  và dùng kết quả mới từ API để cập nhật giao diện.
 
 Ví dụ trước: capacity=1; A confirmed, B queue #1, C queue #2. A hủy -> A cancelled,
 B confirmed (cùng ID, ticket xuất hiện), C #1, confirmed_count=1. Nếu B/C có cùng
@@ -429,11 +478,11 @@ không áp dụng trực tiếp cho Supabase SDK.
 
 | HTTP / code | Điều kiện / endpoint |
 |---|---|
-| 400 VALIDATION_ERROR | Query/body/date/number/enum sai, field lạ/read-only, file thiếu; mọi route có input |
+| 400 VALIDATION_ERROR | Query/body/date/number/enum sai, field lạ/read-only, file thiếu, `Idempotency-Key` của request đăng ký thiếu hoặc sai định dạng |
 | 401 UNAUTHENTICATED | Protected thiếu token; mọi request gửi token sai/hết hạn |
 | 403 FORBIDDEN | Protected sai role/owner hoặc profile chưa sẵn sàng |
 | 404 NOT_FOUND | Workshop/registration path không tồn tại |
-| 409 ALREADY_REGISTERED | POST registrations đã có active của student |
+| 409 ALREADY_REGISTERED | POST registrations dùng khóa mới khi đã có đăng ký hoạt động của student |
 | 409 WORKSHOP_CANCELLED | Register, workshop PATCH/status/banner trên event cancelled |
 | 409 WORKSHOP_STARTED | Register, workshop PATCH/status/banner, cancel active event khi now >= start |
 | 409 REGISTRATION_DEADLINE_PASSED | Register hoặc mở lại khi now >= deadline |
@@ -446,10 +495,14 @@ không áp dụng trực tiếp cho Supabase SDK.
 
 Precedence: authenticate -> role -> lookup (404) -> ownership (403) -> media/size ->
 input validation -> business rules trong transaction. Không tiết lộ PII qua lỗi.
-Business register: event cancelled -> started -> duplicate -> deadline -> manual
-closed -> allocation. Status open: cancelled -> started -> deadline. Workshop PATCH:
-cancelled -> started -> capacity conflict. Cancel registration: already cancelled
-trả 200 trước cutoff. Event cancel: already cancelled trả 200 trước start check.
+Đăng ký: sau xác thực, kiểm tra role, workshop và định dạng header, server lấy
+khóa workshop rồi tra `Idempotency-Key`. Nếu tìm thấy lần đăng ký đã thành công,
+trả `200` theo §6. Với khóa mới, thứ tự kiểm tra là workshop đã hủy → đã bắt đầu
+→ đã có đăng ký hoạt động → quá hạn → đóng thủ công → cấp chỗ hoặc đưa vào hàng chờ.
+
+Mở đăng ký: kiểm tra workshop đã hủy → đã bắt đầu → quá hạn. Sửa workshop: kiểm
+tra đã hủy → đã bắt đầu → sức chứa thấp hơn số người chính thức. Khi hủy đăng ký
+hoặc hủy workshop, bản ghi đã hủy trả `200` trước khi kiểm tra giờ bắt đầu.
 Nếu nội dung HTTP không parse được, lớp transport có thể từ chối 400 trước auth;
 không đưa thông tin resource vào lỗi parse. Không có 403 vì hết chỗ.
 
@@ -472,7 +525,8 @@ Ví dụ validation (400; cùng shape cho date/query/enum, details dùng tên fi
 | Empty list; page ngoài range; filter kết hợp | 200 []; total đúng filter; from inclusive/to exclusive; query enum/date/page sai 400 |
 | Guest, student, organizer khác owner | Guest browse 200; protected thiếu token 401; student create 403; organizer khác owner roster/edit/export 403; ID thiếu 404 |
 | Còn chỗ / full nhưng gate open | 201 confirmed + ticket / 201 waitlisted + rank; full không 409 |
-| Duplicate kể cả concurrent cùng user | Một active duy nhất; request còn lại 409 ALREADY_REGISTERED |
+| Một sinh viên gửi đồng thời hai request với hai khóa khác nhau | Khi các điều kiện đăng ký đều hợp lệ, chỉ tạo một đăng ký hoạt động. Request còn lại trả 409 ALREADY_REGISTERED |
+| Gửi lại cùng khóa sau timeout hoặc gửi đồng thời, kể cả khi đã hủy | Chỉ tạo một bản ghi. Nếu lần đầu đã thành công, request lặp trả 200 với cùng ID. Sau khi hủy, trả status=cancelled và ticket=null. Chỉ thao tác chủ động với khóa mới mới có thể tạo đăng ký mới |
 | 20–50 user khác nhau tranh 1 chỗ, queue ban đầu rỗng (#13) | Đúng 1 confirmed; còn lại 201 waitlisted nếu tất cả hợp lệ, không gate change/cancel; không overbooking |
 | Full -> queue -> confirmed cancel -> promote -> roster (#12) | Người chờ đầu lên confirmed cùng ID, ticket xuất hiện; roster/counts/My Workshops mới khớp |
 | Queue empty; withdrawal; repeat cancel | Hủy confirmed tăng slot; rút chờ chỉ đổi rank; retry 200, không promotion lần hai |
@@ -484,6 +538,9 @@ Ví dụ validation (400; cùng shape cho date/query/enum, details dùng tên fi
 | Banner boundary / media / quyền | Đúng 5 MiB hợp lệ; lớn hơn 413; MIME sai 415; khác owner 403; không thay banner khi fail |
 | Export filtered/full dataset, Unicode/quotes/newlines/formula | Owner-only; chỉ confirmed; không giới hạn trang; CSV escape và chống formula injection; empty có header |
 | Unexpected error giữa cancel/promote | 500 generic; rollback toàn bộ, không mất queue/overbooking |
+| BTC đóng đăng ký trong khi sinh viên đang xem workshop, hoặc một sinh viên được chuyển lên chính thức trong khi BTC đang xem danh sách | Màn hình tương ứng tự hiển thị nút hoặc danh sách đã cập nhật trong tối đa 10 giây sau commit, trong điều kiện mạng bình thường |
+| Request đến trước hạn nhưng lấy được khóa trùng mốc hạn đăng ký hoặc sau đó | Với workshop chưa bắt đầu, đang mở và sinh viên chưa có đăng ký hoạt động, trả 409 REGISTRATION_DEADLINE_PASSED và không tạo bản ghi |
+| BTC hủy workshop sau khi ảnh đã tải lên nhưng trước khi lưu URL | Upload trả 409 WORKSHOP_CANCELLED. Banner hiện tại được giữ nguyên và ảnh mới được dọn |
 
 Các scenario là tiêu chí cho #12–#14; tài liệu docs-only không chứng minh runtime,
 concurrency hoặc bảo mật đã hoạt động.
@@ -496,7 +553,7 @@ concurrency hoặc bảo mật đã hoạt động.
 | Auth và guest browse | SDK trực tiếp, email confirmation bật, profile server idempotent; public browse không PII; organizer provision tin cậy để tránh tự nâng quyền | @NewB-S2deeC0de (#3), @chaengnchang (#1) / @DatBui1826 |
 | Identity/schema hai bảng | Opaque ID ổn định qua promotion; history và unique active xuyên bảng; queue timestamp + immutable sequence; cần map users/Auth | @chaengnchang (#1/#11) / @NewB-S2deeC0de, @Lowen-here |
 | Thời gian/lifecycle/gate | UTC, cutoff start; close/deadline chặn mới nhưng vẫn promote; terminal cancel; capacity tăng promote; retry cancel 200; re-register ID mới | #2/#8/#11 / @chaengnchang |
-| Upload, ticket, export, refresh | 5 MiB JPEG/PNG/WebP; đề xuất Supabase Storage; ticket reference; CSV UTF-8 không BOM; refetch sau mutation, refresh nền chưa chốt | #3/#9/#10 / @DatBui1826, @Lowen-here |
+| Upload, ticket, export, refresh | 5 MiB JPEG/PNG/WebP; đề xuất Supabase Storage; ticket reference; CSV UTF-8 không BOM; tải lại sau thao tác và khi quay lại màn hình, đề xuất tải lại mỗi 5 giây khi tab đang hiển thị theo §2 | #3/#9/#10 / @DatBui1826, @Lowen-here |
 
 Reviewer chính issue #2: **@chaengnchang**; assignees **@NewB-S2deeC0de,
 @DatBui1826, @Lowen-here**. Cần review chéo #1/#2 và đồng thuận nhóm trước merge;
